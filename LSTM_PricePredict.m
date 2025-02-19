@@ -65,7 +65,7 @@ end
 
 
 %% Create Sequences Using a Sliding Window
-sequenceLength = 50;  % Use 20 days to predict the next day
+sequenceLength = 52;  % Use 20 days to predict the next day
 numObservations = length(pricesNorm) - sequenceLength;
 
 % Initialize predictors (as a column cell array) and responses (as a column vector)
