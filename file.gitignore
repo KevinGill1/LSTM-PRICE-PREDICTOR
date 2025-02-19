@@ -1,0 +1,8 @@
+# MATLAB specific files
+*.asv
+*.fig
+*.mex*
+*.mlappinstall
+# Python bytecode
+__pycache__/
+*.pyc
