@@ -1,6 +1,5 @@
 %% Specify Import Options and Load Data
 filename = 'NVDAdata.csv';
-
 % Define the expected variable names and types:
 opts = delimitedTextImportOptions('Delimiter', ',', 'NumVariables', 8);
 opts.VariableNames = {'Date','Open','High','Low','Close','Volume','Dividends','Stock_Splits'};
@@ -38,13 +37,22 @@ else
     error('The CSV file does not contain a "High" column.');
 end
 
-% Remove any rows with NaN values in prices (and corresponding dates later)
-if any(isnan(prices))
-    warning('Prices contain NaN values; removing corresponding rows.');
-    validIdx = ~isnan(prices);
-    prices = prices(validIdx);
-    dates  = dates(validIdx);  % Make sure to also update the dates vector
+if ismember('Volume', data.Properties.VariableNames)
+    volume = data.Volume;
+else
+    error('The CSV file does not contain a "Volume" column.');
 end
+
+
+% Remove rows with NaN values in either prices or volume (and update dates accordingly)
+nanIdx = isnan(prices) | isnan(volume);
+if any(nanIdx)
+    warning('Prices or Volume contain NaN values; removing corresponding rows.');
+    prices = prices(~nanIdx);
+    volume = volume(~nanIdx);
+    dates  = dates(~nanIdx);
+end
+
 
 % Compute the min and max for normalization
 priceMin = min(prices);
@@ -58,62 +66,63 @@ else
     pricesNorm = (prices - priceMin) / (priceMax - priceMin);
 end
 
-% Verify that there are no NaN values now
-if any(isnan(pricesNorm))
-    error('Normalized prices still contain NaN values.');
+% Normalize Volume separately
+volMin = min(volume);
+volMax = max(volume);
+if volMax == volMin
+    warning('Volume range is zero; setting normalized volume to zero.');
+    volumeNorm = zeros(size(volume));
+else
+    volumeNorm = (volume - volMin) / (volMax - volMin);
+end
+
+if any(isnan(pricesNorm)) || any(isnan(volumeNorm))
+    error('Normalized data still contain NaN values.');
 end
 
 
+% % Verify that there are no NaN values now
+% if any(isnan(pricesNorm))
+%     error('Normalized prices still contain NaN values.');
+% end
+
+
 %% Create Sequences Using a Sliding Window
-sequenceLength = 50;  % Use 20 days to predict the next day
+sequenceLength = 50;  % Use 20 days to predict the next day (for high price)
 numObservations = length(pricesNorm) - sequenceLength;
 
-% Initialize predictors (as a column cell array) and responses (as a column vector)
+% Initialize predictors (each observation is a matrix with 2 rows: [high; volume]) 
+% and responses (the target is the high price of the day following the sequence)
 X = cell(numObservations, 1);
 Y = zeros(numObservations, 1);
 
 for i = 1:numObservations
-    % Each input is a row vector of normalized prices over 'sequenceLength' days
-    X{i} = pricesNorm(i:i+sequenceLength-1)';
-    % The target is the price immediately following the sequence
+    % Create a 2 x sequenceLength matrix:
+    % Row 1: normalized high prices, Row 2: normalized volume
+    X{i} = [pricesNorm(i:i+sequenceLength-1)'; volumeNorm(i:i+sequenceLength-1)'];
+    % The target is the normalized high price immediately following the sequence
     Y(i) = pricesNorm(i+sequenceLength);
 end
 
 %% Partition Data into Training and Testing Sets
-% Here, 35% of the observations are used for training, and the rest for testing.
-numTrain = floor(0.30 * numObservations);
+numTrain = floor(0.3 * numObservations);
 XTrain = X(1:numTrain);
 YTrain = Y(1:numTrain);
 XTest  = X(numTrain+1:end);
 YTest  = Y(numTrain+1:end);
 
-%% Define the LSTM Network Architecture
+%% Define the LSTM Network Architecture with Two Input Features
 layers = [ ...
-    sequenceInputLayer(1)
+    sequenceInputLayer(2)  % Now we have 2 features: high price and volume
     lstmLayer(100, 'OutputMode', 'last')
     fullyConnectedLayer(1)
     regressionLayer];
-
-
-% Check for NaNs in normalized prices
-if any(isnan(pricesNorm))
-    error('Normalized prices contain NaN values.');
-end
-
-% Convert cell array X to a numeric array for checking
-XAll = cell2mat(X);
-if any(isnan(XAll(:)))
-    error('Training data contains NaN values.');
-end
-if any(isnan(Y))
-    error('Response data contains NaN values.');
-end
 
 %% Set Training Options
 options = trainingOptions('adam', ...
     'MaxEpochs', 200, ...
     'GradientThreshold', 1, ...
-    'InitialLearnRate', 0.005, ...
+    'InitialLearnRate', 0.001, ... % Lowered learning rate for stability
     'LearnRateSchedule', 'piecewise', ...
     'LearnRateDropPeriod', 125, ...
     'LearnRateDropFactor', 0.2, ...
@@ -126,7 +135,7 @@ net = trainNetwork(XTrain, YTrain, layers, options);
 %% Make Predictions on the Test Set
 YPred = predict(net, XTest, 'MiniBatchSize', 1);
 
-% Inverse normalization for both predictions and true values
+% Inverse normalization for the high price predictions and true values
 YPredUnNorm = YPred * (priceMax - priceMin) + priceMin;
 YTestUnNorm = YTest * (priceMax - priceMin) + priceMin;
 
@@ -135,26 +144,21 @@ figure;
 plot(YTestUnNorm, 'r-', 'LineWidth', 1.5);
 hold on;
 plot(YPredUnNorm, 'b--', 'LineWidth', 1.5);
-legend('Actual Price', 'Predicted Price');
+legend('Actual High Price', 'Predicted High Price');
 xlabel('Time Step (Test Set)');
 ylabel('Stock Price');
-title('LSTM Stock Price Prediction');
+title('LSTM Stock Price Prediction Using High Price and Volume');
 grid on;
 
-
-%% %% Evaluate Model Performance
-% Calculate error metrics for the test set predictions
+%% Evaluate Model Performance
 errors = YTestUnNorm - YPredUnNorm;
-MAE = mean(abs(errors));           % Mean Absolute Error
-MSE = mean(errors.^2);             % Mean Squared Error
-RMSE = sqrt(MSE);                  % Root Mean Squared Error
-
-% Optionally, compute R-squared
+MAE = mean(abs(errors));
+MSE = mean(errors.^2);
+RMSE = sqrt(MSE);
 SST = sum((YTestUnNorm - mean(YTestUnNorm)).^2);
 SSE = sum((YTestUnNorm - YPredUnNorm).^2);
 R2 = 1 - SSE/SST;
 
-% Display the error metrics
 fprintf('Mean Absolute Error (MAE): %.4f\n', MAE);
 fprintf('Mean Squared Error (MSE): %.4f\n', MSE);
 fprintf('Root Mean Squared Error (RMSE): %.4f\n', RMSE);
